@@ -1,0 +1,15 @@
+{
+  "name": "spotify-liked-playlists",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "auth": "bun run auth.ts",
+    "sync": "bun run sync.ts",
+    "dry": "bun run sync.ts --dry-run",
+    "sync:genre": "bun run sync.ts --by=genre",
+    "dry:genre": "bun run sync.ts --by=genre --dry-run"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
