@@ -6,8 +6,8 @@
     "auth": "bun run auth.ts",
     "sync": "bun run sync.ts",
     "dry": "bun run sync.ts --dry-run",
-    "sync:genre": "bun run sync.ts --by=genre",
-    "dry:genre": "bun run sync.ts --by=genre --dry-run"
+    "sync:genre": "bun run sync.ts --by=genre --source=musicbrainz",
+    "dry:genre": "bun run sync.ts --by=genre --source=musicbrainz --dry-run"
   },
   "devDependencies": {
     "@types/bun": "latest"

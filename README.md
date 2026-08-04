@@ -30,8 +30,12 @@ bun run dry          # preview year mode, writes nothing
 bun run sync         # create "Liked 2019", "Liked 2020", ...
 
 bun run dry:genre    # preview genre mode, writes nothing
-bun run sync:genre   # create "Genre: dance pop", "Genre: edm", ...
+bun run sync:genre   # create "Genre: pop", "Genre: electro house", ...
 ```
+
+Genre mode defaults to **MusicBrainz** as the genre source, because Spotify's own genre
+route gets you rate limited for a day (see below). To use Spotify's genres instead, drop
+the flag: `bun run sync.ts --by=genre`.
 
 Always run the dry variant first. Genre mode can produce a lot of playlists because
 Spotify's genre vocabulary is granular, and the dry run tells you exactly how many and
@@ -53,9 +57,8 @@ they have no Spotify uri the API can add.
 
 **Genre resolution:** genres live on the *artist*, never on the track. A track's primary
 genre is the first genre of its first artist that has any, falling back through the other
-artists. Spotify orders an artist's genres by relevance, so index 0 is the prominent one.
-Tracks whose artists carry no tags at all land in `Genre: unknown` rather than being
-dropped.
+artists. Both sources order genres by relevance, so index 0 is the prominent one. Tracks
+whose artists carry no genre at all land in `Genre: unknown` rather than being dropped.
 
 ## API landmines, post March 2026
 
@@ -72,31 +75,67 @@ which is what makes them expensive.
 | `GET /v1/artists?ids=` (batch, 50 at a time) | 403 | `GET /v1/artists/{id}`, one request each |
 | playlist object has `tracks.total` | field is gone | read the items endpoint to count |
 
-### A 403 here almost never means a missing scope
+### Tell the two 403s apart, it saves hours
 
-That is the intuitive assumption and it wastes hours. Confirm scopes are actually granted
-by reading `scope` off the token refresh response before you suspect them. In this project
-all four scopes were granted the whole time and the 403s were entirely about retired
-endpoints.
+There are two completely different 403s and the wording is the only clue:
+
+- `{"message": "Forbidden"}` bare, no reason → **a retired endpoint**. Scopes are fine.
+- `{"message": "Insufficient client scope"}` → genuinely a missing scope.
+
+Confirm scopes by reading `scope` off the token refresh response before suspecting them.
+In this project all four were granted the whole time and every bare 403 was a dead
+endpoint.
 
 Note how inconsistent it is: `PUT /playlists/{id}` (change details) and
-`DELETE /playlists/{id}/followers` both work fine with the same token that gets 403 on
-`/playlists/{id}/tracks`. Endpoint by endpoint, not scope by scope.
+`DELETE /playlists/{id}/followers` both work fine with the same token that gets a bare
+403 on `/playlists/{id}/tracks`. Endpoint by endpoint, not scope by scope.
 
-### Rate limits are per endpoint and brutal
+### Rate limits are per endpoint, shared across catalog, and brutal
 
-Crawling a few hundred artists through the single artist endpoint earned a
-`Retry-After` of **85368 seconds**, about 23.7 hours, on `/artists/{id}` specifically,
-while `/me` kept working normally.
+Crawling a few hundred artists through `/artists/{id}` earned a `Retry-After` of
+**85368 seconds**, about 23.7 hours, with `"reason": "QUOTA_EXCEEDED"`. Meanwhile `/me`
+and `/me/tracks` kept working normally.
+
+The catalog endpoints share that bucket: once `/artists/{id}` was locked, `/albums/{id}`
+returned 429 too. Account endpoints were unaffected.
 
 So: never sleep through `Retry-After` blindly. `spotify.ts` caps in process sleeps at 60
 seconds and throws `RateLimited` beyond that, and `genres.ts` checkpoints its cache every
-25 artists so a lockout costs you nothing but time. Re-run the same command after the
-window and it resumes.
+25 artists so a lockout costs you nothing but time. Re-run and it resumes.
 
-The artist cache in `.cache/artists.json` is what makes genre mode practical. Genres
-change rarely, so after the first full crawl re-runs are nearly free. Delete the file to
-force a refresh.
+The artist caches in `.cache/` are what make genre mode practical. Genres change rarely,
+so after the first full crawl re-runs are nearly free. Delete a cache file to force a
+refresh.
+
+### Getting genres out of Spotify is the hardest part
+
+Genres exist only on the artist object, and every cheap way to read them in bulk is gone:
+
+| Route | Result |
+|---|---|
+| `GET /artists?ids=` (50 at a time) | 403, batch endpoint retired |
+| `GET /artists/{id}` | works, but one request per artist and it triggers the 24h quota lock |
+| `GET /search?type=artist` | works and is **not** quota limited, but `genres` is stripped from results |
+| `GET /albums/{id}` and `/albums?ids=` | album `genres` is near always empty anyway |
+| `GET /me/top/artists`, `/me/following?type=artist` | full artist objects **with** genres, but only a subset of your library, and they need `user-top-read` / `user-follow-read` |
+
+Hence the MusicBrainz path below.
+
+### MusicBrainz as the genre source
+
+`--source=musicbrainz` sidesteps Spotify's quota entirely. No API key, no auth. Two
+gotchas, both handled in `genres.ts`:
+
+- **`tags` are not genres.** The free text `tags` list contains `english`, `2010s`,
+  `philanthropist`, `actors`, `filmschauspieler`. Use the separate curated `genres` list
+  from `/artist/{mbid}?inc=genres`, which is clean.
+- **`score=100` does not mean it matched.** Searching `"IVIE"` returns `Ivie Anderson`
+  with a perfect score. Only trust a normalized exact name equality; anything else must be
+  treated as unresolved.
+
+MusicBrainz asks for at most one request per second and blocks generic user agents, so set
+a real `User-Agent`. It throttles with **503**, not 429. Two requests per artist means a
+full crawl of ~760 artists takes roughly half an hour, once.
 
 ### `popularity` is always 0
 

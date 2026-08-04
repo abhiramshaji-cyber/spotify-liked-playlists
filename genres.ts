@@ -1,61 +1,134 @@
 /**
- * Resolves artist genres, which is the only genre source the Web API exposes.
- * Cached on disk because the batch endpoint is gone and each artist costs one request.
+ * Resolves a genre per artist from one of two sources into one shared cache shape,
+ * keyed by Spotify artist id, so the bucketing logic never needs to know which.
  */
 import { api, RateLimited } from "./spotify";
 
-const CACHE_FILE = new URL(".cache/artists.json", import.meta.url).pathname;
-
+export type Source = "spotify" | "musicbrainz";
+export type Artist = { id: string; name: string };
 export type ArtistEntry = { name: string; genres: string[] };
 export type ArtistCache = Record<string, ArtistEntry>;
 
-export async function loadCache(): Promise<ArtistCache> {
-  const file = Bun.file(CACHE_FILE);
+const cacheFile = (source: Source) => new URL(`.cache/${source}.json`, import.meta.url).pathname;
+
+export async function loadCache(source: Source): Promise<ArtistCache> {
+  const file = Bun.file(cacheFile(source));
   return (await file.exists()) ? file.json() : {};
 }
 
-export async function saveCache(cache: ArtistCache) {
-  await Bun.write(CACHE_FILE, JSON.stringify(cache, null, 0));
+export async function saveCache(source: Source, cache: ArtistCache) {
+  await Bun.write(cacheFile(source), JSON.stringify(cache));
 }
 
-/**
- * Fills the cache for every id given, most frequent first so a rate limit stop
- * still leaves the artists that matter most resolved.
- * Returns how many remain unresolved; a RateLimited stop is not an error here.
- */
-export async function resolveArtists(
-  ids: string[],
-  cache: ArtistCache,
-): Promise<{ fetched: number; remaining: number; limited: RateLimited | null }> {
-  const todo = ids.filter((id) => !(id in cache));
-  let fetched = 0;
+export type Progress = { fetched: number; remaining: number; limited: RateLimited | null };
 
-  for (const id of todo) {
+/** Artists must arrive most frequent first so an early stop leaves the ones that matter resolved. */
+export async function resolveArtists(
+  source: Source,
+  artists: Artist[],
+  cache: ArtistCache,
+): Promise<Progress> {
+  const todo = artists.filter((a) => !(a.id in cache));
+  return source === "spotify" ? viaSpotify(todo, cache) : viaMusicBrainz(todo, cache);
+}
+
+async function checkpoint(source: Source, cache: ArtistCache, n: number, total: number) {
+  if (n === 0 || n % 10 !== 0) return;
+  await saveCache(source, cache);
+  console.log(`  resolved ${n}/${total} artists`);
+}
+
+async function viaSpotify(todo: Artist[], cache: ArtistCache): Promise<Progress> {
+  let fetched = 0;
+  for (const artist of todo) {
     try {
       // GET /artists?ids= (batch) returns 403 since the March 2026 migration.
-      const a = await api<{ name: string; genres?: string[] }>(`/artists/${id}`);
-      cache[id] = { name: a.name, genres: a.genres ?? [] };
+      const a = await api<{ name: string; genres?: string[] }>(`/artists/${artist.id}`);
+      cache[artist.id] = { name: a.name, genres: a.genres ?? [] };
       fetched++;
     } catch (e) {
       if (e instanceof RateLimited) {
-        await saveCache(cache);
+        await saveCache("spotify", cache);
         return { fetched, remaining: todo.length - fetched, limited: e };
       }
       throw e;
     }
-    if (fetched % 25 === 0) {
-      await saveCache(cache);
-      console.log(`  resolved ${fetched}/${todo.length} artists`);
+    await checkpoint("spotify", cache, fetched, todo.length);
+  }
+  await saveCache("spotify", cache);
+  return { fetched, remaining: 0, limited: null };
+}
+
+const MB = "https://musicbrainz.org/ws/2";
+const MB_UA =
+  "spotify-liked-playlists/1.0 (https://github.com/abhiramshaji-cyber/spotify-liked-playlists)";
+const MB_DELAY_MS = 1100;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+async function mbFetch(path: string, attempt = 0): Promise<any> {
+  const res = await fetch(`${MB}${path}`, { headers: { "User-Agent": MB_UA } });
+  // MusicBrainz throttles with 503 rather than 429 and expects about 1 request per second.
+  if (res.status >= 500 && attempt < 4) {
+    await sleep(2000 * (attempt + 1));
+    return mbFetch(path, attempt + 1);
+  }
+  if (!res.ok) throw new Error(`MusicBrainz ${res.status} on ${path}`);
+  return res.json();
+}
+
+/**
+ * Two requests per artist: search by name, then read curated genres by MBID.
+ * MusicBrainz `tags` are free text and contain junk like "english" or "actors",
+ * so only the separate `genres` list is usable here.
+ */
+async function viaMusicBrainz(todo: Artist[], cache: ArtistCache): Promise<Progress> {
+  let fetched = 0;
+  let unmatched = 0;
+
+  for (const artist of todo) {
+    try {
+      const q = encodeURIComponent(`"${artist.name.replace(/"/g, "")}"`);
+      const found = await mbFetch(`/artist?query=artist:${q}&fmt=json&limit=5`);
+      await sleep(MB_DELAY_MS);
+
+      // MB returns score=100 for clearly wrong artists, so trust only an exact name match.
+      const match = (found.artists ?? []).find(
+        (a: any) => normalize(a.name ?? "") === normalize(artist.name),
+      );
+      if (!match) {
+        cache[artist.id] = { name: artist.name, genres: [] };
+        unmatched++;
+        fetched++;
+        await checkpoint("musicbrainz", cache, fetched, todo.length);
+        continue;
+      }
+
+      const full = await mbFetch(`/artist/${match.id}?inc=genres&fmt=json`);
+      await sleep(MB_DELAY_MS);
+      cache[artist.id] = {
+        name: artist.name,
+        genres: (full.genres ?? [])
+          .sort((a: any, b: any) => (b.count ?? 0) - (a.count ?? 0))
+          .map((g: any) => g.name as string),
+      };
+      fetched++;
+    } catch (e) {
+      // Left uncached deliberately so the next run retries instead of locking in a miss.
+      console.error(`  ${artist.name}: ${(e as Error).message}`);
     }
+    await checkpoint("musicbrainz", cache, fetched, todo.length);
   }
 
-  await saveCache(cache);
-  return { fetched, remaining: 0, limited: null };
+  await saveCache("musicbrainz", cache);
+  if (unmatched) console.log(`  ${unmatched} artists had no confident name match`);
+  return { fetched, remaining: todo.length - fetched, limited: null };
 }
 
 /**
  * The track's most prominent genre: the first genre of its first artist that has any.
- * Spotify orders an artist's genres by relevance, so index 0 is the prominent one.
+ * Both sources order genres by relevance, so index 0 is the prominent one.
  */
 export function primaryGenre(artistIds: string[], cache: ArtistCache): string | null {
   for (const id of artistIds) {

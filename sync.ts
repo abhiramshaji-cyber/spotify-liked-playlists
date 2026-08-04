@@ -4,14 +4,16 @@
  * Safe to re-run: only missing tracks are appended, manual edits are preserved.
  *
  *   bun run sync.ts                    year mode
- *   bun run sync.ts --by=genre         genre mode
+ *   bun run sync.ts --by=genre         genre mode, genres from Spotify
+ *   bun run sync.ts --by=genre --source=musicbrainz   genres from MusicBrainz
  *   bun run sync.ts --dry-run          preview, writes nothing
  */
 import { api, paginate, chunk, RateLimited, resumeHint } from "./spotify";
-import { loadCache, resolveArtists, primaryGenre } from "./genres";
+import { loadCache, resolveArtists, primaryGenre, type Source } from "./genres";
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const MODE = process.argv.includes("--by=genre") ? "genre" : "year";
+const SOURCE: Source = process.argv.includes("--source=musicbrainz") ? "musicbrainz" : "spotify";
 
 type SavedTrack = {
   added_at: string;
@@ -25,7 +27,7 @@ type SavedTrack = {
 
 type Playlist = { id: string; name: string; owner: { id: string } };
 
-type Liked = { uri: string; addedAt: string; artistIds: string[] };
+type Liked = { uri: string; addedAt: string; artists: { id: string; name: string }[] };
 
 async function collectLiked() {
   const rows: Liked[] = [];
@@ -47,7 +49,9 @@ async function collectLiked() {
     rows.push({
       uri: t.uri,
       addedAt: item.added_at,
-      artistIds: (t.artists ?? []).map((a) => a.id).filter((id): id is string => !!id),
+      artists: (t.artists ?? [])
+        .filter((a): a is { id: string; name: string } => !!a?.id)
+        .map((a) => ({ id: a.id, name: a.name })),
     });
     if (total % 500 === 0) console.log(`  read ${total} liked songs`);
   }
@@ -66,14 +70,20 @@ function yearBucketing(): Bucketing {
 }
 
 async function genreBucketing(rows: Liked[]): Promise<Bucketing> {
-  const cache = await loadCache();
+  const cache = await loadCache(SOURCE);
   const counts = new Map<string, number>();
-  for (const r of rows) for (const id of r.artistIds) counts.set(id, (counts.get(id) ?? 0) + 1);
+  const named = new Map<string, string>();
+  for (const r of rows)
+    for (const a of r.artists) {
+      counts.set(a.id, (counts.get(a.id) ?? 0) + 1);
+      named.set(a.id, a.name);
+    }
   const ids = [...counts.keys()].sort((a, b) => counts.get(b)! - counts.get(a)!);
+  const artists = ids.map((id) => ({ id, name: named.get(id)! }));
 
   const already = ids.filter((id) => id in cache).length;
-  console.log(`Genres: ${already}/${ids.length} artists cached, resolving the rest...`);
-  const { fetched, remaining, limited } = await resolveArtists(ids, cache);
+  console.log(`Genres via ${SOURCE}: ${already}/${ids.length} artists cached, resolving the rest...`);
+  const { fetched, remaining, limited } = await resolveArtists(SOURCE, artists, cache);
   console.log(`Resolved ${fetched} artists this run, ${remaining} still unresolved.`);
 
   if (limited) {
@@ -90,7 +100,7 @@ async function genreBucketing(rows: Liked[]): Promise<Bucketing> {
 
   return {
     name: (t) => {
-      const g = primaryGenre(t.artistIds, cache);
+      const g = primaryGenre(t.artists.map((a) => a.id), cache);
       // Spotify genre strings are lowercase by design; title casing mangles "edm" and "r&b".
       return g ? `Genre: ${g}` : "Genre: unknown";
     },
@@ -124,7 +134,7 @@ async function existingUris(playlistId: string) {
 
 async function main() {
   const me = await api<{ id: string; display_name: string }>("/me");
-  console.log(`Signed in as ${me.display_name ?? me.id} | mode: ${MODE}\n`);
+  console.log(`Signed in as ${me.display_name ?? me.id} | mode: ${MODE}${MODE === "genre" ? ` via ${SOURCE}` : ""}\n`);
 
   console.log("Reading your liked songs...");
   const { rows, total, skippedLocal, skippedNull } = await collectLiked();
