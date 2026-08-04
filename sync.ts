@@ -9,11 +9,12 @@
  *   bun run sync.ts --dry-run          preview, writes nothing
  */
 import { api, paginate, chunk, RateLimited, resumeHint } from "./spotify";
-import { loadCache, resolveArtists, primaryGenre, type Source } from "./genres";
+import { loadCache, resolveArtists, assignGenres, UNKNOWN, OTHER, type Source } from "./genres";
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const MODE = process.argv.includes("--by=genre") ? "genre" : "year";
 const SOURCE: Source = process.argv.includes("--source=musicbrainz") ? "musicbrainz" : "spotify";
+const MIN_TRACKS = Number(process.argv.find((a) => a.startsWith("--min="))?.slice(6) ?? 0);
 
 type SavedTrack = {
   added_at: string;
@@ -98,18 +99,24 @@ async function genreBucketing(rows: Liked[]): Promise<Bucketing> {
   const withGenres = ids.filter((id) => cache[id]?.genres?.length).length;
   console.log(`${withGenres}/${ids.length} artists carry genre tags.\n`);
 
+  const assign = assignGenres(
+    rows.map((r) => ({ uri: r.uri, artistIds: r.artists.map((a) => a.id) })),
+    cache,
+    MIN_TRACKS,
+  );
+
   return {
-    name: (t) => {
-      const g = primaryGenre(t.artists.map((a) => a.id), cache);
-      // Spotify genre strings are lowercase by design; title casing mangles "edm" and "r&b".
-      return g ? `Genre: ${g}` : "Genre: unknown";
-    },
+    name: (t) => `Genre: ${assign.get(t.uri) ?? UNKNOWN}`,
     describe: (name) =>
-      name === "Genre: unknown"
-        ? "Liked songs whose artists carry no genre tags in the Spotify API."
+      name === `Genre: ${UNKNOWN}`
+        ? "Liked songs whose artists carry no genre tags in either source."
+        : name === `Genre: ${OTHER}`
+        ? "Liked songs whose genre is too rare in this library to deserve its own playlist."
         : `Liked songs whose primary genre is ${name.replace("Genre: ", "")}. Generated automatically.`,
   };
 }
+
+
 
 async function findMyPlaylists(userId: string) {
   const mine = new Map<string, Playlist>();

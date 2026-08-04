@@ -137,3 +137,52 @@ export function primaryGenre(artistIds: string[], cache: ArtistCache): string | 
   }
   return null;
 }
+
+/** Every genre a track could be filed under, best first, for collapsing rare buckets. */
+export function candidateGenres(artistIds: string[], cache: ArtistCache): string[] {
+  const seen = new Set<string>();
+  for (const id of artistIds) for (const g of cache[id]?.genres ?? []) seen.add(g);
+  return [...seen];
+}
+
+/** Reserved bucket labels; a genre with either name would be shadowed. */
+export const UNKNOWN = "unknown";
+export const OTHER = "other";
+
+/**
+ * Final genre bucket per track, keyed by uri. With minTracks > 1, a track whose primary
+ * genre is claimed by fewer than that many tracks is refiled under its next genre that
+ * clears the bar, so the long tail of one song playlists collapses.
+ */
+export function assignGenres(
+  tracks: { uri: string; artistIds: string[] }[],
+  cache: ArtistCache,
+  minTracks: number,
+): Map<string, string> {
+  const primary = new Map<string, string | null>();
+  const counts = new Map<string, number>();
+  for (const t of tracks) {
+    const g = primaryGenre(t.artistIds, cache);
+    primary.set(t.uri, g);
+    if (g) counts.set(g, (counts.get(g) ?? 0) + 1);
+  }
+
+  const out = new Map<string, string>();
+  for (const t of tracks) {
+    const g = primary.get(t.uri) ?? null;
+    if (!g) {
+      out.set(t.uri, UNKNOWN);
+      continue;
+    }
+    // Counts stay fixed: refiling only ever moves tracks into already popular buckets.
+    if (minTracks <= 1 || (counts.get(g) ?? 0) >= minTracks) {
+      out.set(t.uri, g);
+      continue;
+    }
+    const fallback = candidateGenres(t.artistIds, cache).find(
+      (c) => (counts.get(c) ?? 0) >= minTracks,
+    );
+    out.set(t.uri, fallback ?? OTHER);
+  }
+  return out;
+}
