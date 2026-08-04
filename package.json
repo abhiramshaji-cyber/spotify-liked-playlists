@@ -7,6 +7,8 @@
     "sync": "bun run sync.ts",
     "dry": "bun run sync.ts --dry-run",
     "sync:genre": "bun run sync.ts --by=genre --source=musicbrainz --min=8",
+    "covers": "bun run covers.ts",
+    "covers:dry": "bun run covers.ts --dry-run",
     "test": "bun run genres.test.ts",
     "dry:genre": "bun run sync.ts --by=genre --source=musicbrainz --dry-run"
   },

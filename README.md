@@ -29,6 +29,9 @@ That writes a refresh token to `.tokens.json`. You never log in again.
 bun run dry          # preview year mode, writes nothing
 bun run sync         # create "Liked 2019", "Liked 2020", ...
 
+bun run covers       # generate and upload playlist cover art
+bun run covers:dry   # render covers to .cache/covers/ and stop
+
 bun run dry:genre    # preview genre mode, writes nothing
 bun run sync:genre   # create "Genre: pop", "Genre: electro house", ...
 ```
@@ -65,6 +68,7 @@ those playlists survive.
 - `auth.ts` one time OAuth login on a loopback server.
 - `genres.ts` resolves artist genres and caches them on disk.
 - `sync.ts` reads Liked Songs, buckets them, upserts the playlists.
+- `covers.ts` generates a cover per playlist as SVG, renders it to JPEG, uploads it.
 
 Songs are ordered oldest to newest within each playlist. Local files are skipped because
 they have no Spotify uri the API can add.
@@ -150,6 +154,30 @@ gotchas, both handled in `genres.ts`:
 MusicBrainz asks for at most one request per second and blocks generic user agents, so set
 a real `User-Agent`. It throttles with **503**, not 429. Two requests per artist means a
 full crawl of ~760 artists takes roughly half an hour, once.
+
+### Telling a real cover from Spotify's auto art
+
+The playlist object always has `images` populated, so an empty array is **not** how you
+find playlists lacking a cover. Read the host instead:
+
+| Host | Meaning |
+|---|---|
+| `mosaic.scdn.co` | auto generated 4 tile mosaic, no real cover |
+| `i.scdn.co` | single album's art, used when a playlist has too few tracks for a mosaic |
+| `image-cdn-*.spotifycdn.com` | a genuine custom upload |
+
+`covers.ts` treats the first two as "needs a cover" and never overwrites the third.
+
+### Uploading a cover
+
+`PUT /playlists/{id}/images` with `Content-Type: image/jpeg` and a **base64 string as the
+raw body**, not JSON, not multipart. Needs the `ugc-image-upload` scope, which is easy to
+forget since nothing else here uses it. JPEG only, and the base64 payload must stay under
+256 KB, so `covers.ts` steps quality down until it fits.
+
+Generation is `rsvg-convert` for SVG to PNG then `sips` for PNG to JPEG, both already on
+macOS. When sizing text in SVG, note Helvetica Bold caps run about **0.70em per glyph**;
+a 0.63 estimate silently clipped the longer titles off the right edge.
 
 ### `popularity` is always 0
 

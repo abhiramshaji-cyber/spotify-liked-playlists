@@ -12,6 +12,7 @@ export const SCOPES = [
   "playlist-read-private",
   "playlist-modify-private",
   "playlist-modify-public",
+  "ugc-image-upload",
 ].join(" ");
 
 export function credentials() {
