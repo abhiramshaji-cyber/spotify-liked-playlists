@@ -37,9 +37,23 @@ Genre mode defaults to **MusicBrainz** as the genre source, because Spotify's ow
 route gets you rate limited for a day (see below). To use Spotify's genres instead, drop
 the flag: `bun run sync.ts --by=genre`.
 
-Always run the dry variant first. Genre mode can produce a lot of playlists because
-Spotify's genre vocabulary is granular, and the dry run tells you exactly how many and
-how big before anything is written to your account.
+Always run the dry variant first. Genre vocabulary is granular enough that a flat split
+gets ugly fast: on a 1097 song library it produced **105 playlists, 57 of them holding one
+or two songs**. Use `--min=N` to collapse that tail, and read the counts off the dry run
+before writing:
+
+| Threshold | Playlists | With <=2 songs | In `other` |
+|---|---|---|---|
+| flat | 105 | 57 | 0 |
+| `--min=8` | 23 | 0 | 45 |
+| `--min=12` | 13 | 0 | 66 |
+| `--min=20` | 9 | 0 | 108 |
+
+`bun run sync:genre` defaults to `--min=8`.
+
+Changing the threshold later creates a **new** set of playlists and leaves the old ones
+behind, because idempotency is keyed on playlist name. Delete the previous set yourself if
+you switch.
 
 Both modes are **idempotent**. They read each playlist back, diff against your liked
 songs, and append only what is missing, so re-running is safe and your manual edits to
