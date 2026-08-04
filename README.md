@@ -197,6 +197,12 @@ Management** in the dashboard.
 change. There is no API path to fix this; set it in the Spotify client
 (right click a playlist, **Make private**).
 
+To check whether a playlist is genuinely public, fetch the owner's profile page
+anonymously and look for it: `https://open.spotify.com/user/{user_id}`. Do **not** test by
+fetching the playlist URL directly, because Spotify "private" playlists are still reachable
+by direct link, so a 200 there proves nothing. `GET /users/{id}/playlists` with a
+client credentials token would be the clean check, but it is 403 post migration.
+
 ## Exit codes
 
 - `0` success
