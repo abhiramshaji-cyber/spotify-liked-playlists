@@ -208,3 +208,11 @@ client credentials token would be the clean check, but it is 403 post migration.
 - `0` success
 - `1` some tracks failed to add, re-run to retry them
 - `2` rate limited, the message tells you when to resume
+
+## Contributing
+
+Issues and pull requests are welcome. Additions to the API landmines section above are the most useful contribution. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
